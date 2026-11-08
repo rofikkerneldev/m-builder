@@ -77,31 +77,28 @@ jobs:
         env:
           GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
         run: |
-          set -e
+          set -u   # (no -e: a single bad part must not kill the rest)
           IMG="${{ steps.create_image.outputs.image_name }}"
           echo "Built image: $IMG ($(du -h "$IMG" | cut -f1))"
 
-          # Split into ~9.5 GB parts (under gofile's ~10 GB free cap)
           mkdir -p parts
           split -b 9500m -d -a 2 "$IMG" "parts/${IMG}.part"
+          ls -lh parts/
 
-          upload() {
-            local f="$1"
-            local server
-            server=$(curl -s https://api.gofile.io/servers | jq -r '.data.servers[0].name')
-            echo "Uploading $f -> server $server"
-            curl -s --retry 5 --retry-all-errors \
-              ${GOFILE_API_KEY:+-H "Authorization: Bearer ${GOFILE_API_KEY}"} \
-              -F "file=@${f}" \
-              "https://${server}.gofile.io/uploadFile"
-            echo
-          }
+          # no jq on the runner -> parse the gofile server/link with sed
+          SERVER=$(curl -s https://api.gofile.io/servers | sed -n 's/.*"name":"\([a-z0-9-]*\)".*/\1/p' | head -1)
+          [ -n "$SERVER" ] || SERVER=store9
+          echo "GoFile server: $SERVER"
 
           for p in parts/*; do
-            RESP=$(upload "$p")
-            echo "$RESP" | jq . 2>/dev/null || echo "$RESP"
-            LINK=$(echo "$RESP" | jq -r '.data.downloadPage // .data.directLink // empty' 2>/dev/null)
-            echo "GOFILE_LINK :: $p :: $LINK"
+            echo "Uploading $p ..."
+            RESP=$(curl -s --retry 5 --retry-all-errors \
+              ${GOFILE_API_KEY:+-H "Authorization: Bearer ${GOFILE_API_KEY}"} \
+              -F "file=@${p}" \
+              "https://${SERVER}.gofile.io/uploadFile")
+            echo "$RESP"
+            LINK=$(echo "$RESP" | sed -n 's/.*"downloadPage":"\([^"]*\)".*/\1/p')
+            echo "GOFILE_LINK :: $(basename "$p") :: ${LINK:-FAILED}"
           done
 
       - name: Summary
